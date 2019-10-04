@@ -1,0 +1,603 @@
+---
+title: "VideoGamesSales"
+author: "Lukasz Kolodziejek"
+date: "03/10/2019"
+output:
+  pdf_document: default
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+## Overview
+
+This is VideoGameSales Capstone project 2 for online course HarvardX: PH125.9x
+
+Capstone project 2 gives opportunity to use a publicly available dataset to solve the problem of own choice.
+
+Goal is to demonstrate skills important for data scientists, which includes clear communication of the process and insights gained from an analysis and proper documentation.
+
+In this project Video Games Sales with ratings dataset from [Kaggle](https://www.kaggle.com) will be used.
+
+Dataset can be downloaded from [here](https://www.kaggle.com/rush4ratio/video-game-sales-with-ratings/download).
+
+As access to file on Kaggle requires authorization for purpose of this project dataset copy has been created on Author's GitHub to allow for automatic download from R code:
+
+[https://github.com/lkolodziejek/VideoGameSales/blob/master/Video_Games_Sales_as_at_22_Dec_2016.csv](https://github.com/lkolodziejek/VideoGameSales/blob/master/Video_Games_Sales_as_at_22_Dec_2016.csv)
+
+In scope of this project Video Games Sales data will be analysed and multiple models will be used to try to predict Global Sales with highest accuracy. Mean Root Square Error (MRSE) will be used to measure performance of models.
+
+After initial data anslysis certain Features will be selected to be used in the models.
+
+# Analysis
+
+## Libraries and initial settings
+
+First required libraries are being installed and loaded: 
+
+```{r libsettings, results="hide", warning=FALSE, message=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(hexbin)) install.packages("hexbin", repos = "http://cran.us.r-project.org")
+if(!require(doParallel)) install.packages("doParallel", repos = "http://cran.us.r-project.org")
+```
+
+Next, as calculations in this project requires a lot of computing power, parallel processing is enabled to leverage all CPUs and cores:
+
+```{r enablingparallprocessing, results="hide", warning=FALSE, message=FALSE}
+split <- detectCores()
+cl <- makePSOCKcluster(split)
+registerDoParallel(cl)
+```
+
+## Data ingestion
+
+Data is being downloaded from author's GitHub account and loaded.
+GitHub is being used for automatic data downloading, as Kaggle requires authorization and copy of data might not always be available.
+
+```{r ingestion, results="hide", warning=FALSE, message=FALSE}
+dl <- tempfile()
+download.file("https://github.com/lkolodziejek/VideoGameSales/blob/master/Video_Games_Sales_as_at_22_Dec_2016.csv", dl)
+games <- fread("Video_Games_Sales_as_at_22_Dec_2016.csv", header=TRUE)
+```
+
+## Data wrangling
+
+After loading data is being wrangled and cleaned.
+
+Empty fields are being replaced with NA, numeric values are being formatted as numbers. Categorical data are being formatted as factors and finally only data from before 2017 is being kept, as more recent data is incomplete.
+
+```{r wrangling, results="hide", warning=FALSE, message=FALSE}
+games[games==""] <- NA #Fill missing values with NA
+games$Year_of_Release <- as.numeric(as.character(games$Year_of_Release))
+games$User_Score <- as.numeric(as.character(games$User_Score))*10 #Normalize User_Score to same scale as Critic_Score
+games$Genre <- as.factor(games$Genre)
+games$Publisher <- as.factor(games$Publisher)
+games$Developer <- as.factor(games$Developer)
+games$Rating <- as.factor(games$Rating)
+games$Platform <- as.factor(games$Platform)
+games <- games[-which(games$Year_of_Release>2016)] #As data after 2016 is not complete, remove it
+```
+```
+
+## Data exploration
+
+Our data analysis starts with description of Columns and basic statistics about them:
+
+```{r dataset}
+summary(games)
+```
+
+We also check dimensions of the data:
+
+```{r dimensions}
+dim(games)
+```
+
+And list top rows to better understand data structure:
+
+```{r datahead}
+head(games)
+```
+
+As we can see dataset contains information about games sales and provides data like: 
+
+* Game Name
+* Platform on which it has been released
+* Year of release
+* Game genre
+* Publisher
+* Sales per region and it's sum (Global Sales)
+* Critic Score and numer of critics reviews
+* User Score and number of users reviews
+* Developer 
+
+Unfortunately some of the data are missing and there we can see NA value.
+
+We can display number of games released per year (if game has been released on 3 different platforms, its being counted as 3):
+
+```{r gamesperyearaggregation, include=FALSE}
+gamesRelease <- games %>% select(Year_of_Release) %>%
+  group_by(Year_of_Release)%>% 
+  summarise(Count=n())
+```
+
+```{r gamesperyearfiguer, echo=FALSE, fig.cap="Number of games released per year", warning=FALSE, message=FALSE, fig.pos = 'H'}
+gamesRelease %>% ggplot(aes(Year_of_Release, Count))+geom_line()+scale_x_continuous(limits=c(1980,2016))
+```
+
+Games sales per region in time:
+
+```{r gamessalesperregiondata, include=FALSE}
+gamesSales <- games %>% select(Year_of_Release,NA_Sales, EU_Sales, JP_Sales, Other_Sales) %>%
+  group_by(Year_of_Release)%>% 
+  summarise(NorthAmerica=sum(NA_Sales), EU=sum(EU_Sales), Japan=sum(JP_Sales), Other=sum(Other_Sales))
+
+gamesSales <- gamesSales %>%
+  select(Year_of_Release, NorthAmerica, EU, Japan, Other) %>%
+  gather(key = "Market", value = "Sales", -Year_of_Release)
+```
+
+```{r gamessalesperregionfiguer, echo=FALSE, fig.cap="Games sales per region", warning=FALSE, message=FALSE, fig.pos = 'H'}
+gamesSales %>% ggplot(aes(Year_of_Release, Sales, color=Market))+geom_line()+scale_x_continuous(limits=c(1980,2016))+ggtitle("Sales volume per market")
+```
+
+Let's also display distribution of User Score:
+
+```{r userscoredistributionfiguer, echo=FALSE, fig.cap="Games sales per region", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>% ggplot(aes(User_Score)) + geom_histogram(binwidth = 5)+scale_x_continuous(limits=c(0,100))
+```
+
+and Critics score:
+
+```{r criticsscoredistributionfiguer, echo=FALSE, fig.cap="Games sales per region", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>% ggplot(aes(Critic_Score)) + geom_histogram(binwidth = 5)+scale_x_continuous(limits=c(0,100))
+```
+
+Let's display top 10 games with highest sales:
+
+```{r top10titleshighestsales, echo=FALSE}
+games %>% 
+  group_by(Name) %>%
+  summarize(sumGlobalSales = sum(Global_Sales)) %>%
+  arrange(desc(sumGlobalSales)) %>%
+  top_n(10) %>% knitr::kable()
+```
+
+
+Top 10 best rated games by users
+
+  
+```{r top10bestratedusers, echo=FALSE}
+games %>% 
+  group_by(Name) %>%
+  summarize(meanUserScore = mean(User_Score)) %>%
+  arrange(desc(meanUserScore)) %>%
+  top_n(10) %>% knitr::kable()
+```
+
+Top 10 best rates games by critics
+  
+```{r top10bestratedcritics, echo=FALSE}
+games %>% 
+  group_by(Name) %>%
+  summarize(meanUserScore = mean(User_Score)) %>%
+  arrange(desc(meanUserScore)) %>%
+  top_n(10) %>% knitr::kable()
+```
+
+Let also also see if there is correlation between User Score and Critic Score:
+
+```{r userscriticscorrelationfiguer, echo=FALSE, fig.cap="Correlation between Users and Critics score", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>%
+  group_by(Name) %>%
+  summarize(meanUserScore = mean(User_Score), meanCriticScore = mean(Critic_Score)) %>%
+  ggplot(aes(meanCriticScore, meanUserScore)) +geom_bin2d() + scale_fill_gradient(
+    low = "red",
+    high = "yellow") 
+```
+
+As we User Score and Critic Score have positive correlation and we can calculate it's value to be: `r cor(games$User_Score, games$Critic_Score, use="complete.obs")`
+
+## Looking for features that may have correlation with Global Sales
+
+Let's start with assessing Sales per released game in time:
+
+```{r salesintimefiguer, echo=FALSE, fig.cap="Sales per game released in time", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>% select(Year_of_Release, Global_Sales) %>%
+  group_by(Year_of_Release)%>% 
+  summarise(globalSales = sum(Global_Sales), count=n(), salesPerGameReleased=globalSales/count) %>% 
+  ggplot(aes(Year_of_Release, salesPerGameReleased))+geom_line()+scale_x_continuous(limits=c(1980,2016))
+```
+
+We can see that correlation is quite weak and hence Year_of_Release doesn't seem like a best predictor of sales.
+
+Next let's have a look into Sales per released game depending on Genre:
+
+```{r salesdependingongenrefiguer, echo=FALSE, fig.cap="Sales per game released depending on Genre", warning=FALSE, message=FALSE, fig.pos = 'H'}
+genresBySales <- games %>% 
+  group_by(Genre) %>%
+  summarize(globalSales = sum(Global_Sales), count=n(), salesPerGameReleased=globalSales/count) %>%
+  arrange(desc(salesPerGameReleased))
+
+genresBySales <- genresBySales[-which(is.na(genresBySales$Genre)),] #Remove from data NA category of games
+games$Genre <- factor(games$Genre, genresBySales$Genre) #Reorder factors to display in descending order
+
+games %>% 
+  group_by(Genre) %>%
+  summarize(globalSales = sum(Global_Sales), count=n(), salesPerGameReleased=globalSales/count) %>%
+  arrange(desc(salesPerGameReleased)) %>%
+  ggplot(aes(Genre, salesPerGameReleased)) +geom_bar(stat="identity")+ggtitle("Sales per game released depending on Genre")
+```
+
+Diagram indicates that there is some correlation between game Genre and Sales. This is good candidate to become feature in our analysis.
+
+Now let's have a look into Sales per released game depending on Platform:
+  
+```{r top10gamesperplatform, echo=FALSE}
+games %>% 
+  group_by(Platform) %>%
+  summarize(globalSales = sum(Global_Sales), count=n(), salesPerPlatform=globalSales/count) %>%
+  arrange(desc(salesPerPlatform)) %>%
+  top_n(10) %>% knitr::kable()
+```
+
+There is some weak correlation visisble as well.
+
+We can also expect that there is extremely strong correlation between Regional Sales and Global Sales. Let's check this by comparing Global Sales and Nort America Sales:
+
+```{r regionalglobalsalesfiguer, echo=FALSE, fig.cap="Correlation between North America and Global Sales", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>%
+  group_by(Name) %>%
+  ggplot(aes(NA_Sales, Global_Sales)) +geom_bin2d() + scale_fill_gradient(
+    low = "red",
+    high = "yellow") 
+```
+
+As expected, correlation extremely strong. It's value is:  `r cor(games$NA_Sales, games$Global_Sales, use="complete.obs")`. 
+
+This is not surprsing, as Regional Sales directly impacts and drives Global Sales. However it's not cause for high Global Sales, they are just correlated.
+
+We can also expect strong correlation between User Count and Global Sales. The better game sales, the more people will play it, the more will rate it. Let's plot it:
+
+```{r usercountglobalsalesfiguer, echo=FALSE, fig.cap="Correlation between Users and Critics score", warning=FALSE, message=FALSE, fig.pos = 'H'}
+games %>%
+  group_by(Name) %>%
+  ggplot(aes(User_Count, Global_Sales)) +geom_bin2d() + scale_fill_gradient(
+    low = "red",
+    high = "yellow") 
+```
+
+Surprisingly, correlation is not that strong and equals to only `r cor(games$User_Count, games$Global_Sales, use="complete.obs")`. 
+
+Anyhow, high User_Count is not cause of high Global Sales, probably rather it's result. Hence we shouldn't take it as feature for our analysis.
+
+Ok, so we now that we should exclude from our analysis Regional Sales and User Count. We will also exclude observations missing values for our model constructions as this would affect our predictions. Let's do that now:
+
+```{r subsettingnas, results="hide", warning=FALSE, message=FALSE}
+games <- na.omit(games)
+games <- subset(games, select = -c(NA_Sales, EU_Sales, JP_Sales, Other_Sales, User_Count))
+```
+
+We will select to our analysis following features:
+
+* Platform
+* User_Score
+* Critic_Score
+* Critic_Count
+* Genre
+* Year_of_Release
+* Rating
+
+## Building models
+
+First we will set seed to make sure that our analysis results are easily replicable:
+
+```{r setingseed, results="hide", warning=FALSE, message=FALSE}
+set.seed(1, sample.kind="Rounding")
+```
+
+In order to start model preparation we need first to define function, which will be used to select best performing model. For this we will define MRSE:
+
+```{r r, resultmsefedinitions="hide", warning=FALSE, message=FALSE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+We will also split our dataset into training and validation datasets:
+
+```{r datasetsplit, results="hide", warning=FALSE, message=FALSE}
+validation_index <- createDataPartition(y = games$Global_Sales, times = 1, p = 0.2, list = FALSE)
+train <- games[-validation_index,]
+validation <- games[validation_index,]
+```
+
+## Model 0 - Simple mean
+
+Now we are ready to start working on actual models.
+
+As basis for our further analysis we will define simplest possible model which predicts as Global Sale average from all population.
+
+```{r model0, results="hide", warning=FALSE, message=FALSE}
+mu <- mean(train$Global_Sales)
+```
+
+Let's now calculate this model RMSE on training data:
+
+```{r model0rmse}
+model_0_rmse <- RMSE(train$Global_Sales, mu)
+model_0_rmse 
+```
+```{r model0databinding, include=FALSE}
+rmse_results <- tibble(method = "Model 0 - Simple mean", RMSE = model_0_rmse)
+```
+
+## Model 1 - Linear model
+
+For our first model we will use linear model:
+
+```{r model1, results="hide", warning=FALSE, message=FALSE}
+train_lm <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                       method = "lm", data = train, na.action = na.exclude)
+```
+
+Let's now calculate this model RMSE on training data:
+
+```{r model1rmse}
+getTrainPerf(train_lm)$TrainRMSE
+```
+```{r model1databinding, include=FALSE}
+model_1_rmse <- getTrainPerf(train_lm)$TrainRMSE
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 1 - Linear model",
+                                     RMSE = model_1_rmse ))
+```
+
+It's also worth to have a look into variables with highest importance for the model:
+
+```{r model1imp}
+varImp(train_lm)
+```
+
+## Model 2 - Generalized linear model
+
+As our second model we will use GLM:
+
+```{r model2, results="hide", warning=FALSE, message=FALSE}
+train_glm <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                   method = "glm", data = train, na.action = na.exclude)
+```
+
+Let's now calculate this model RMSE on training data:
+
+```{r model2rmse}
+getTrainPerf(train_glm)$TrainRMSE
+```
+```{r model2databinding, include=FALSE}
+model_2_rmse <- getTrainPerf(train_glm)$TrainRMSE
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 2 - Generalized Linear model",
+                                     RMSE = model_2_rmse ))
+```
+
+And here are variables with highest importance for the model:
+
+```{r model2imp}
+varImp(train_glm)
+```
+
+## Model 3 - Support Vector Machines with Linear Kernel model
+
+As our third model we will use svmLinear:
+
+```{r model3, results="hide", warning=FALSE, message=FALSE}
+train_svm <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                   method = "svmLinear", data = train, na.action = na.exclude)
+```
+
+Let's now calculate this model RMSE on training data:
+
+```{r model3rmse}
+getTrainPerf(train_svm)$TrainRMSE
+```
+```{r model3databinding, include=FALSE}
+model_3_rmse <- getTrainPerf(train_svm)$TrainRMSE
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 3 - Support Vector Machines with Linear Kernel model",
+                                     RMSE = model_3_rmse ))
+```
+
+And here are variables with highest importance for the model:
+
+```{r model3imp}
+varImp(train_svm)
+```
+
+As we can see Year_of_Release feature is not being used for prediction at all.
+
+## Model 4 - K-Nearest Neighbors model
+
+For fourth model we will use knn:
+
+```{r model4, results="hide", warning=FALSE, message=FALSE}
+train_knn <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                   method = "knn", data = train, na.action = na.exclude)
+```
+
+Let's now calculate this model RMSE on training data:
+
+```{r model4rmse}
+getTrainPerf(train_knn)$TrainRMSE
+```
+```{r model4databinding, include=FALSE}
+model_4_rmse <- getTrainPerf(train_knn)$TrainRMSE
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 4 - k-Nearest Neighbors model",
+                                     RMSE = model_4_rmse ))
+```
+
+And here are variables with highest importance for the model and tested k-values:
+
+```{r model4imp}
+varImp(train_knn)
+train_knn$results
+```
+
+## Model 5 - Random Forest
+
+As our fifth model we wll use Random Forest:
+
+```{r model5, results="hide", warning=FALSE, message=FALSE}
+train_rf <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                  method = "rf", data = train, na.action = na.exclude, ntree=50, metric="RMSE", trControl = trainControl(method = "repeatedcv", number=10,repeats=3))
+```
+
+Let's now calculate this model RMSE on training data and let's review achieved results depending on mtry parameter:
+
+```{r model5rmse}
+getTrainPerf(train_rf)$TrainRMSE
+train_rf$results
+```
+```{r model5databinding, include=FALSE}
+model_5_rmse <- getTrainPerf(train_rf)$TrainRMSE
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 5 - Random Forest",
+                                     RMSE = model_5_rmse ))
+```
+
+## Model 6 - Random Forest After Tuning model
+
+As our final model we will try to optimize Random Forest.
+
+First we will define tuning grid and variable to store results of optimization:
+
+```{r model6grid, results="hide", warning=FALSE, message=FALSE}
+mtry = c(5:15)
+rf_grid <- data.frame(mtry)
+rf_grid
+```
+```{r model6datagathering, include=FALSE}
+tuning_results <- data.frame(matrix(ncol = length(mtry)+1, nrow=0))
+colnames(tuning_results) <- c("ntree", mtry)
+```
+
+Now we will run our model multiple times to find optimal parameters: mtry & ntree:
+
+```{r model6optimization, results="hide", warning=FALSE, message=FALSE}
+modellist <- list()
+for (numtree in seq(5,100,by=5)) {
+  train_trf <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                     method = "rf", data = train, na.action = na.exclude, ntree=numtree, tuneGrid=rf_grid, metric="RMSE", trControl = trainControl(method = "repeatedcv", number=10,repeats=3))
+  tuning_results[nrow(tuning_results) + 1,] = c(numtree, train_trf$results$RMSE)
+  key <- toString(numtree)
+  modellist[[key]] <- train_trf
+}
+```
+
+Now we can display achieved RMSE depending on mtry & ntree parameters:
+
+```{r model6optimizationresults, warning=FALSE, message=FALSE}
+tuning_results
+```
+```{r model6datatidying, include=FALSE}
+tr <- gather(tuning_results, "mtry", "RMSE", 2:(length(mtry)+1))
+tr$mtry <- factor(tr$mtry, levels=mtry)
+```
+
+Now we can plot graph presenting achieved RMSE depending on Random Forest tuning parameters:
+
+```{r model6mtryntreeimpactonrmsefiguer, echo=FALSE, fig.cap="mtry & ntree parameters impact on achieved MRSE", warning=FALSE, message=FALSE, fig.pos = 'H'}
+tr %>% ggplot(aes(ntree, RMSE))+geom_line(aes(color=mtry))
+```
+
+Now we can display optimal RMSE and parameters for which it was achieved:
+
+```{r model6rmse}
+min(tr$RMSE)
+tr[which.min(tr$RMSE),]
+```
+```{r model6databinding, include=FALSE}
+model_6_rmse <- min(tr$RMSE)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 6 - Random Forest After Tuning model",
+                                     RMSE = model_6_rmse ))
+```
+
+# Results
+
+On our training dataset we have achieved following results:
+
+```{r resultslisting, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+As our best performing model we select last Model 6 - Tuned Random Forest model.
+
+Now when we have selected model together with parameters it's time to test it performance on our validation dataset.
+
+For this let's code our final model:
+
+```{r modelfinal, warning=FALSE, message=FALSE}
+optimal_mtry <- as.numeric(as.character(tr[which.min(tr$RMSE),2]))
+optimal_mtry
+optimal_ntree <- as.numeric(as.character(tr[which.min(tr$RMSE),1]))
+optimal_ntree
+optimal_rf_grid <- data.frame(mtry = optimal_mtry)
+train_final <- train(Global_Sales ~ Platform + User_Score + Critic_Score + Critic_Count + Genre + Year_of_Release + Rating,
+                   method = "rf", data = train, na.action = na.exclude, ntree = optimal_ntree, tuneGrid = optimal_rf_grid, metric="RMSE", trControl = trainControl(method = "repeatedcv", number=10,repeats=3))
+```
+
+and let's predict Global Sales based on our validation data:
+
+```{r modelfinalpredict, results="hide", warning=FALSE, message=FALSE}
+predicted <- predict(train_final, validation)
+```
+
+Finally we can calculate RMSE on our validation data:
+
+```{r modelfinalrmse, warning=FALSE, message=FALSE}
+RMSE(validation$Global_Sales, predicted)
+```
+```{r modelfinalassigningfinalrmse, include=FALSE}
+final_rmse <- RMSE(validation$Global_Sales, predicted)
+```
+```{r modelfinalassigningvalidationrmse, include=FALSE}
+model_0_validation_rmse <- RMSE(validation$Global_Sales, mu)
+```
+# Conclusion
+
+Video Games Sales dataset has been explored and analysed.
+
+Regional sales data and user count have been exluded as features, as they are not causation of Global Sales.
+
+In order to best predict Global Sales based on available features first Reference Model (Model 0) has been created.
+
+Then 6 models have been implemented and their results analysed.
+
+The best performance offers last model - Random Forest with optimized parameters. 
+
+It allowed us to achieve RMSE on validation dataset of `r final_rmse`. 
+
+Reference / simplest model on validation data allows to achieve: `r model_0_validation_rmse`
+
+In comparision to the reference / simplest model this is improvement of: `r format(round((model_0_validation_rmse-final_rmse)/model_0_validation_rmse, 2), nsmall = 2)`%. 
+
+This result is far from being sufficient for real live sales prediction. This is not surprising as there are many factors which impact games sales and in our model we were able to include only 7 features. 
+
+In order to improve our predictions we should have more information, like for example: development budget, marketing spendings etc.
+
+Our model could be improved as well, for example by applying Matrix Factorization. We should cluster similar titles (like for example games from same series) and apply this effects to our predictions.
+
+```{r stopparallelprocessing, include=FALSE, warning=FALSE, message=FALSE}
+stopCluster(cl) #stops cluster created for parallel processing
+```
